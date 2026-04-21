@@ -1,0 +1,151 @@
+{
+  "Comment": "Praveen Retail Pipeline with Mode-Based Execution (Initial vs Incremental)",
+  "StartAt": "Mode_Selector",
+  "States": {
+    "Mode_Selector": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.mode",
+          "StringEquals": "initial",
+          "Next": "Extraction"
+        },
+        {
+          "Variable": "$.mode",
+          "StringEquals": "incremental",
+          "Next": "IncrementalLoad"
+        }
+      ],
+      "Default": "Notify_Failure"
+    },
+    "Extraction": {
+      "Type": "Task",
+      "Comment": "Lambda: Extract customers, products, behavior → S3 Bronze (CSV)",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:eu-west-2:666127452756:function:bd_praveen_postgresql:$LATEST",
+        "Payload.$": "$"
+      },
+      "ResultPath": "$.bronze_result",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException"
+          ],
+          "IntervalSeconds": 10,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Notify_Failure",
+          "ResultPath": "$.error"
+        }
+      ],
+      "Next": "InitialLoad"
+    },
+    "InitialLoad": {
+      "Type": "Task",
+      "Comment": "Glue: Bronze CSV → Silver Parquet (customers, products, behavior)",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName": "praveen_proj_initial_load"
+      },
+      "ResultPath": "$.initial_load_result",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "IntervalSeconds": 30,
+          "MaxAttempts": 1,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Notify_Failure",
+          "ResultPath": "$.error"
+        }
+      ],
+      "Next": "Wait"
+    },
+    "IncrementalLoad": {
+      "Type": "Task",
+      "Comment": "Glue: Incremental customers PostgreSQL → Silver (job bookmark)",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName": "praveen_proj_pipeline1"
+      },
+      "ResultPath": "$.incremental_result",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "IntervalSeconds": 30,
+          "MaxAttempts": 1,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Notify_Failure",
+          "ResultPath": "$.error"
+        }
+      ],
+      "Next": "Wait"
+    },
+    "Wait": {
+      "Type": "Wait",
+      "Comment": "Wait 90 seconds for downstream processes (crawler/Gold layer)",
+      "Seconds": 90,
+      "Next": "Notify_Success"
+    },
+    "Notify_Success": {
+      "Type": "Task",
+      "Comment": "SNS: Send success email",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "arn:aws:sns:eu-west-2:666127452756:praveen_topic",
+        "Subject": "Praveen Pipeline SUCCESS",
+        "Message.$": "States.Format('Pipeline SUCCESS (mode: {}). Completed successfully.', $.mode)"
+      },
+      "ResultPath": "$.success_notification",
+      "Next": "Pipeline_Succeeded"
+    },
+    "Notify_Failure": {
+      "Type": "Task",
+      "Comment": "SNS: Send failure email",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "arn:aws:sns:eu-west-2:666127452756:praveen_topic",
+        "Subject": "Praveen Pipeline FAILED",
+        "Message.$": "States.Format('Pipeline FAILED (mode: {}). Error: {}', $.mode, States.JsonToString($.error))"
+      },
+      "ResultPath": "$.failure_notification",
+      "Next": "Pipeline_Failed"
+    },
+    "Pipeline_Succeeded": {
+      "Type": "Succeed",
+      "Comment": "Pipeline completed successfully"
+    },
+    "Pipeline_Failed": {
+      "Type": "Fail",
+      "Error": "PipelineFailed",
+      "Cause": "One or more stages failed"
+    }
+  }
+}
